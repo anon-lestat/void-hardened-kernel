@@ -1,16 +1,17 @@
-# Template file for 'linux5.4'
+ # Template file for 'linux5.4'
 pkgname=linux5.4
-version=5.4.173
+version=5.4.266
 revision=1
-wrksrc="linux-${version}"
 short_desc="Linux kernel and modules (${version%.*} series)"
-maintainer="Helmut Pozimski <helmut@pozimski.eu>"
+maintainer="Orphaned <orphan@voidlinux.org>"
 license="GPL-2.0-only"
 homepage="https://www.kernel.org"
-distfiles="https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-${version}.tar.xz"
-checksum=99e8e275b239c708bdb6a41990c4d12098a61752245dbef921a514d9f996c239
+distfiles="https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-${version%.*}.tar.xz
+ https://cdn.kernel.org/pub/linux/kernel/v5.x/patch-${version}.xz"
+checksum="bf338980b1670bca287f9994b7441c2361907635879169c64ae78364efc5f491
+ 44d1b2b8670eb5d631694d552826236ef41df58ad6b4557851f8b3624196f51a"
 python_version=3
-patch_args="-Np1"
+skip_extraction="patch-${version}.xz"
 
 nodebug=yes  # -dbg package is generated below manually
 nostrip=yes
@@ -25,6 +26,7 @@ hostmakedepends="tar xz bc elfutils-devel flex gmp-devel kmod libmpc-devel
 _kernver="${version}_${revision}"
 triggers="kernel-hooks"
 kernel_hooks_version="${_kernver}"
+
 
 # These files could be modified when an external module is built.
 mutable_files="
@@ -43,6 +45,11 @@ mutable_files="
 export KBUILD_BUILD_TIMESTAMP=${SOURCE_DATE_EPOCH:-0}
 export KBUILD_BUILD_USER=voidlinux
 export KBUILD_BUILD_HOST=voidlinux
+
+pre_patch() {
+	xzcat $XBPS_SRCDISTDIR/$pkgname-$version/patch-${version}.xz |
+		patch -sNp1 -F0
+}
 
 do_configure() {
 	# 5.4 misses Documentation/DocBook. We ship the directory from 4.12 here.
@@ -303,4 +310,14 @@ do_install() {
 	# Keep arch/x86/ras/Kconfig as it is needed by drivers/ras/Kconfig
 	mkdir -p ${hdrdest}/arch/x86/ras
 	cp -a arch/x86/ras/Kconfig ${hdrdest}/arch/x86/ras/Kconfig
+}
+linux5.4-headers_package() {
+	preserve=yes
+	nostrip=yes
+	noshlibprovides=yes
+	short_desc+=" - source headers for 3rd party modules"
+	pkg_install() {
+		vmove usr/src
+		vmove usr/lib/modules/${_kernver}/build
+	}
 }
