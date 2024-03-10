@@ -442,7 +442,7 @@ index b8de27bb6e09..4149f330076f 100644
  
  /*
 diff --git a/arch/x86/kernel/sys_x86_64.c b/arch/x86/kernel/sys_x86_64.c
-index 42e31358a9d3..e13f2166f922 100644
+index 42e31358a9d3..2bf3c2c2ca76 100644
 --- a/arch/x86/kernel/sys_x86_64.c
 +++ b/arch/x86/kernel/sys_x86_64.c
 @@ -54,13 +54,6 @@ static unsigned long get_align_bits(void)
@@ -459,6 +459,27 @@ index 42e31358a9d3..e13f2166f922 100644
  static int __init control_va_addr_alignment(char *str)
  {
  	/* guard against enabling this on other CPU families */
+@@ -119,10 +112,7 @@ static void find_start_end(unsigned long addr, unsigned long flags,
+ 	}
+ 
+ 	*begin	= get_mmap_base(1);
+-	if (in_32bit_syscall())
+-		*end = task_size_32bit();
+-	else
+-		*end = task_size_64bit(addr > DEFAULT_MAP_WINDOW);
++	*end	= get_mmap_base(0);
+ }
+ 
+ unsigned long
+@@ -207,7 +197,7 @@ arch_get_unmapped_area_topdown(struct file *filp, const unsigned long addr0,
+ 
+ 	info.flags = VM_UNMAPPED_AREA_TOPDOWN;
+ 	info.length = len;
+-	info.low_limit = PAGE_SIZE;
++	info.low_limit = get_mmap_base(1);
+ 	info.high_limit = get_mmap_base(0);
+ 
+ 	/*
 diff --git a/arch/x86/mm/init_32.c b/arch/x86/mm/init_32.c
 index 0a74407ef92e..5ceff405c81c 100644
 --- a/arch/x86/mm/init_32.c
@@ -611,10 +632,10 @@ index 18e874b0441e..a010a4a5830e 100644
  obj-$(CONFIG_USB)		+= usbcore.o
  
 diff --git a/drivers/usb/core/hub.c b/drivers/usb/core/hub.c
-index 238674fab7ce..289edfcd7f42 100644
+index 9a1954e9f6f1..6f11c74a55af 100644
 --- a/drivers/usb/core/hub.c
 +++ b/drivers/usb/core/hub.c
-@@ -5095,6 +5095,12 @@ static void hub_port_connect(struct usb_hub *hub, int port1, u16 portstatus,
+@@ -5087,6 +5087,12 @@ static void hub_port_connect(struct usb_hub *hub, int port1, u16 portstatus,
  			goto done;
  		return;
  	}
@@ -742,7 +763,7 @@ index a7d78241082a..58901ced219e 100644
  err:
  	up_write(&mm->mmap_sem);
 diff --git a/fs/namei.c b/fs/namei.c
-index a4cba6991a4d..ad71a8abbd82 100644
+index f6708ab8ec7e..f349d8ef0d56 100644
 --- a/fs/namei.c
 +++ b/fs/namei.c
 @@ -877,10 +877,10 @@ static inline void put_link(struct nameidata *nd)
@@ -872,10 +893,10 @@ index ecce0f43c73a..e46306dd4401 100644
  {
  	return true;
 diff --git a/include/linux/fs.h b/include/linux/fs.h
-index e009b52ab6b0..71e374c77338 100644
+index fbbd7ef7f653..b0e3e5b682d2 100644
 --- a/include/linux/fs.h
 +++ b/include/linux/fs.h
-@@ -3645,4 +3645,15 @@ static inline int inode_drain_writes(struct inode *inode)
+@@ -3642,4 +3642,15 @@ static inline int inode_drain_writes(struct inode *inode)
  	return filemap_write_and_wait(inode->i_mapping);
  }
  
@@ -916,7 +937,7 @@ index e9d2024473b0..e75cfbcfda56 100644
  		mask |= FS_ISDIR;
  
 diff --git a/include/linux/gfp.h b/include/linux/gfp.h
-index c89f8456f18d..c85e898c2a37 100644
+index 61f2f6ff9467..f9b3e3d675ae 100644
 --- a/include/linux/gfp.h
 +++ b/include/linux/gfp.h
 @@ -553,9 +553,9 @@ extern struct page *alloc_pages_vma(gfp_t gfp_mask, int order,
@@ -1288,7 +1309,7 @@ index 01a1334c5fc5..576e00382884 100644
  extern void *__vmalloc_node_flags(unsigned long size, int node, gfp_t flags);
  static inline void *__vmalloc_node_flags_caller(unsigned long size, int node,
 diff --git a/include/net/tcp.h b/include/net/tcp.h
-index 164ba7b77bd9..159339f324a4 100644
+index af67e19eba39..5764f18de253 100644
 --- a/include/net/tcp.h
 +++ b/include/net/tcp.h
 @@ -246,6 +246,7 @@ void tcp_time_wait(struct sock *sk, int state, int timeo);
@@ -1472,10 +1493,10 @@ index f641518f4ac5..54786890b3e7 100644
  	bool "Page allocator randomization"
  	default SLAB_FREELIST_RANDOM && ACPI_NUMA
 diff --git a/kernel/audit.c b/kernel/audit.c
-index 39e84d65d253..12b4b3b478c0 100644
+index 805b0c9972d3..4bd9b5e16adb 100644
 --- a/kernel/audit.c
 +++ b/kernel/audit.c
-@@ -1695,6 +1695,9 @@ static int __init audit_enable(char *str)
+@@ -1678,6 +1678,9 @@ static int __init audit_enable(char *str)
  
  	if (audit_default == AUDIT_OFF)
  		audit_initialized = AUDIT_DISABLED;
@@ -1516,7 +1537,7 @@ index 1444f3954d75..8cc9dd7992f2 100644
  
  /**
 diff --git a/kernel/events/core.c b/kernel/events/core.c
-index f18a5bbc66ef..1ad470ef3fd0 100644
+index 1e62a567b0d7..1509b0fe4641 100644
 --- a/kernel/events/core.c
 +++ b/kernel/events/core.c
 @@ -404,8 +404,13 @@ static cpumask_var_t perf_online_mask;
@@ -1533,7 +1554,7 @@ index f18a5bbc66ef..1ad470ef3fd0 100644
  
  /* Minimum for 512 kiB + 1 user control page */
  int sysctl_perf_event_mlock __read_mostly = 512 + (PAGE_SIZE / 1024); /* 'free' kiB per user */
-@@ -11041,6 +11046,9 @@ SYSCALL_DEFINE5(perf_event_open,
+@@ -11027,6 +11032,9 @@ SYSCALL_DEFINE5(perf_event_open,
  	if (flags & ~PERF_FLAG_ALL)
  		return -EINVAL;
  
@@ -1683,7 +1704,7 @@ index 0427a86743a4..5e6a9b4ccb41 100644
  
  void tasklet_init(struct tasklet_struct *t,
 diff --git a/kernel/sysctl.c b/kernel/sysctl.c
-index 865e539c7354..6a3032679601 100644
+index 4f85f7ed42fc..f24b64f2be5d 100644
 --- a/kernel/sysctl.c
 +++ b/kernel/sysctl.c
 @@ -100,6 +100,9 @@
@@ -1808,7 +1829,7 @@ index 865e539c7354..6a3032679601 100644
  #endif
  
  static struct ctl_table kern_table[] = {
-@@ -580,6 +584,15 @@ static struct ctl_table kern_table[] = {
+@@ -576,6 +580,15 @@ static struct ctl_table kern_table[] = {
  		.proc_handler	= proc_dointvec,
  	},
  #endif
@@ -1824,7 +1845,7 @@ index 865e539c7354..6a3032679601 100644
  #ifdef CONFIG_PROC_SYSCTL
  	{
  		.procname	= "tainted",
-@@ -936,6 +949,26 @@ static struct ctl_table kern_table[] = {
+@@ -932,6 +945,26 @@ static struct ctl_table kern_table[] = {
  		.extra2		= &two,
  	},
  #endif
@@ -1851,7 +1872,7 @@ index 865e539c7354..6a3032679601 100644
  	{
  		.procname	= "ngroups_max",
  		.data		= &ngroups_max,
-@@ -2679,16 +2712,34 @@ static int proc_taint(struct ctl_table *table, int write,
+@@ -2675,16 +2708,34 @@ static int proc_taint(struct ctl_table *table, int write,
  	return err;
  }
  
@@ -1890,7 +1911,7 @@ index 865e539c7354..6a3032679601 100644
  
  /**
   * struct do_proc_dointvec_minmax_conv_param - proc_dointvec_minmax() range checking structure
-@@ -3386,6 +3437,12 @@ int proc_douintvec_minmax(struct ctl_table *table, int write,
+@@ -3382,6 +3433,12 @@ int proc_douintvec_minmax(struct ctl_table *table, int write,
  	return -ENOSYS;
  }
  
@@ -1903,7 +1924,7 @@ index 865e539c7354..6a3032679601 100644
  int proc_dointvec_jiffies(struct ctl_table *table, int write,
  		    void __user *buffer, size_t *lenp, loff_t *ppos)
  {
-@@ -3466,6 +3523,7 @@ EXPORT_SYMBOL(proc_douintvec);
+@@ -3462,6 +3519,7 @@ EXPORT_SYMBOL(proc_douintvec);
  EXPORT_SYMBOL(proc_dointvec_jiffies);
  EXPORT_SYMBOL(proc_dointvec_minmax);
  EXPORT_SYMBOL_GPL(proc_douintvec_minmax);
@@ -1912,10 +1933,10 @@ index 865e539c7354..6a3032679601 100644
  EXPORT_SYMBOL(proc_dointvec_ms_jiffies);
  EXPORT_SYMBOL(proc_dostring);
 diff --git a/kernel/time/hrtimer.c b/kernel/time/hrtimer.c
-index 1b301dd1692b..73af067fefd5 100644
+index e2a055e46255..61abc899ed97 100644
 --- a/kernel/time/hrtimer.c
 +++ b/kernel/time/hrtimer.c
-@@ -1648,7 +1648,7 @@ static void __hrtimer_run_queues(struct hrtimer_cpu_base *cpu_base, ktime_t now,
+@@ -1647,7 +1647,7 @@ static void __hrtimer_run_queues(struct hrtimer_cpu_base *cpu_base, ktime_t now,
  	}
  }
  
@@ -2720,7 +2741,7 @@ index 4d4dba1d42ae..89fe646c79dd 100644
  };
  
 diff --git a/net/ipv4/tcp_input.c b/net/ipv4/tcp_input.c
-index 61243531a7f4..8559658cbaa2 100644
+index 982fe464156a..ca0a7fdbae70 100644
 --- a/net/ipv4/tcp_input.c
 +++ b/net/ipv4/tcp_input.c
 @@ -81,6 +81,7 @@
@@ -3047,7 +3068,7 @@ index 5711689deb6a..fab0cb896907 100644
 -
 -	  If you are unsure how to answer this question, answer 0.
 diff --git a/security/selinux/hooks.c b/security/selinux/hooks.c
-index 6fec9fba41a8..b3da856a6482 100644
+index d9f15c84aab7..885054911de2 100644
 --- a/security/selinux/hooks.c
 +++ b/security/selinux/hooks.c
 @@ -135,18 +135,7 @@ static int __init selinux_enabled_setup(char *str)
