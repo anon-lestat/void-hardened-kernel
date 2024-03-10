@@ -1,0 +1,82 @@
+diff -rcNP og/Documentation/admin-guide/sysctl/kernel.rst new/Documentation/admin-guide/sysctl/kernel.rst
+*** og/Documentation/admin-guide/sysctl/kernel.rst	2022-01-23 17:06:11.000000000 +0200
+--- new/Documentation/admin-guide/sysctl/kernel.rst	2022-01-23 17:04:03.000000000 +0200
+***************
+*** 743,750 ****
+  perf_event_paranoid:
+  ====================
+
+! Controls use of the performance events system by unprivileged
+! users (without CAP_SYS_ADMIN).  The default value is 2.
+
+  ===  ==================================================================
+   -1  Allow use of (almost) all events by all users
+--- 743,750 ----
+  perf_event_paranoid:
+  ====================
+
+! Controls use of the performance events system by
+! users.  The default value is 2.
+
+  ===  ==================================================================
+   -1  Allow use of (almost) all events by all users
+***************
+*** 759,765 ****
+
+  >=2  Disallow kernel profiling by users without CAP_SYS_ADMIN
+
+! >=3  Disallow use of any event by users without CAP_SYS_ADMIN
+  ===  ==================================================================
+
+
+--- 759,767 ----
+
+  >=2  Disallow kernel profiling by users without CAP_SYS_ADMIN
+
+! >=3  Disallow all unprivileged perf event use
+!
+! >=69  Disallow all perf event use by everyone, including root
+  ===  ==================================================================
+
+
+diff -rcNP og/include/linux/perf_event.h new/include/linux/perf_event.h
+*** og/include/linux/perf_event.h	2022-01-23 17:06:04.000000000 +0200
+--- new/include/linux/perf_event.h	2022-01-23 17:00:53.000000000 +0200
+***************
+*** 1257,1262 ****
+--- 1257,1267 ----
+  	return sysctl_perf_event_paranoid > 2;
+  }
+
++ static inline bool perf_paranoid_all(void)
++ {
++ 	return sysctl_perf_event_paranoid = 69;
++ }
++
+  static inline bool perf_paranoid_tracepoint_raw(void)
+  {
+  	return sysctl_perf_event_paranoid > -1;
+diff -rcNP og/kernel/events/core.c new/kernel/events/core.c
+*** og/kernel/events/core.c	2022-01-23 17:06:05.000000000 +0200
+--- new/kernel/events/core.c	2022-01-23 17:00:53.000000000 +0200
+***************
+*** 405,410 ****
+--- 405,411 ----
+   *   1 - disallow cpu events for unpriv
+   *   2 - disallow kernel profiling for unpriv
+   *   3 - disallow all unpriv perf event use
++  *   69 - disallow all perf event use
+   */
+  #ifdef CONFIG_SECURITY_PERF_EVENTS_RESTRICT
+  int sysctl_perf_event_paranoid __read_mostly = 3;
+***************
+*** 10940,10945 ****
+--- 10941,10949 ----
+  	if (flags & ~PERF_FLAG_ALL)
+  		return -EINVAL;
+
++ 	if (perf_paranoid_all())
++ 		return -EACCES;
++
+  	if (perf_paranoid_any() && !capable(CAP_SYS_ADMIN))
+  		return -EACCES;

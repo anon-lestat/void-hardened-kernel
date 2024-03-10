@@ -1,0 +1,87 @@
+diff -rcNP linux/include/net/tcp.h tirdad/include/net/tcp.h
+*** linux/include/net/tcp.h	2021-02-22 10:35:19.000000000 +0200
+--- tirdad/include/net/tcp.h	2021-02-22 10:25:37.000000000 +0200
+***************
+*** 241,246 ****
+--- 241,247 ----
+  
+  /* sysctl variables for tcp */
+  extern int sysctl_tcp_max_orphans;
++ extern int sysctl_tcp_random_isn;
+  extern long sysctl_tcp_mem[3];
+  extern int sysctl_tcp_simult_connect;
+  
+diff -rcNP linux/net/core/secure_seq.c tirdad/net/core/secure_seq.c
+*** linux/net/core/secure_seq.c	2021-02-17 11:35:20.000000000 +0200
+--- tirdad/net/core/secure_seq.c	2021-02-22 10:28:57.000000000 +0200
+***************
+*** 21,26 ****
+--- 21,27 ----
+  #include <net/tcp.h>
+  
+  static siphash_key_t net_secret __read_mostly;
++ static siphash_key_t last_secret = {{0,0}};
+  static siphash_key_t ts_secret __read_mostly;
+  
+  static __always_inline void net_secret_init(void)
+***************
+*** 134,140 ****
+--- 135,160 ----
+  		   __be16 sport, __be16 dport)
+  {
+  	u32 hash;
++ 	u32 temp;
+  
++ 	 	net_secret_init();
++ 
++ 		if (sysctl_tcp_random_isn){
++ 			if (!last_secret.key[0] && !last_secret.key[1]){
++ 				memcpy(&last_secret,&net_secret,sizeof(last_secret));
++ 			}else{
++ 				temp = *((u32*)&(net_secret.key[0]));
++ 				temp >>= 8;
++ 				last_secret.key[0]+=temp;
++ 				temp = *((u32*)&(net_secret.key[1]));
++ 				temp >>= 8;
++ 				last_secret.key[1]+=temp;
++ 			}
++ 			hash = siphash_3u32((__force u32)saddr, (__force u32)daddr,
++ 				        (__force u32)sport << 16 | (__force u32)dport,
++ 				        &last_secret);
++ 			return hash;
++ 		}
+  	net_secret_init();
+  	hash = siphash_3u32((__force u32)saddr, (__force u32)daddr,
+  			    (__force u32)sport << 16 | (__force u32)dport,
+diff -rcNP linux/net/ipv4/sysctl_net_ipv4.c tirdad/net/ipv4/sysctl_net_ipv4.c
+*** linux/net/ipv4/sysctl_net_ipv4.c	2021-02-22 10:35:20.000000000 +0200
+--- tirdad/net/ipv4/sysctl_net_ipv4.c	2021-02-22 10:30:09.000000000 +0200
+***************
+*** 471,476 ****
+--- 471,483 ----
+  
+  static struct ctl_table ipv4_table[] = {
+  	{
++ 	.procname	= "tcp_random_isn",
++ 	.data		= &sysctl_tcp_random_isn,
++ 	.maxlen		= sizeof(int),
++ 	.mode		= 0644,
++ 	.proc_handler	= proc_dointvec
++ 	},
++ 	{
+  		.procname	= "tcp_max_orphans",
+  		.data		= &sysctl_tcp_max_orphans,
+  		.maxlen		= sizeof(int),
+diff -rcNP linux/net/ipv4/tcp_input.c tirdad/net/ipv4/tcp_input.c
+*** linux/net/ipv4/tcp_input.c	2021-02-22 10:35:20.000000000 +0200
+--- tirdad/net/ipv4/tcp_input.c	2021-02-22 10:31:04.000000000 +0200
+***************
+*** 81,86 ****
+--- 81,87 ----
+  #include <net/busy_poll.h>
+  
+  int sysctl_tcp_max_orphans __read_mostly = NR_FILE;
++ int sysctl_tcp_random_isn __read_mostly = 0;
+  int sysctl_tcp_simult_connect __read_mostly = IS_ENABLED(CONFIG_TCP_SIMULT_CONNECT_DEFAULT_ON);
+  
+  #define FLAG_DATA		0x01 /* Incoming frame contained data.		*/
