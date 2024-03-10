@@ -7,7 +7,7 @@ Configured using whonix hardened-kernel config.
 
 Being tested: Sysfs patch.
 
-Working on: Minisec (Pax port)
+Working on: finishing 0005 - sysfs patch
 
 Current problems (issues are welcome):
 
