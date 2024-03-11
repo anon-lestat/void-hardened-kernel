@@ -1,0 +1,186 @@
+diff --color -rcNP clean/Documentation/admin-guide/sysctl/fs.rst patched/Documentation/admin-guide/sysctl/fs.rst
+*** clean/Documentation/admin-guide/sysctl/fs.rst	2019-11-25 03:32:01.000000000 +0300
+--- patched/Documentation/admin-guide/sysctl/fs.rst	2024-03-11 06:40:21.075638751 +0300
+***************
+*** 48,53 ****
+--- 48,54 ----
+  - suid_dumpable
+  - super-max
+  - super-nr
++ - sysfs_restrict
+  
+  
+  aio-nr & aio-max-nr
+***************
+*** 272,277 ****
+--- 273,303 ----
+  This protection is based on the restrictions in Openwall and grsecurity.
+  
+  
++ sysfs_restrict
++ --------------
++ 
++ This toggle controls the permissions of sysfs (the pseudo-filesystem
++ mounted at /sys).
++ 
++ When sysfs_restrict is set to (0), there are no restrictions and
++ unprivileged users are permitted to access sysfs. When sysfs_restrict
++ is set to (1), sysfs and any filesystem normally mounted under
++ it (e.g. debugfs) will be accessible only by root.
++ 
++ These filesystems generally provide access to hardware and debug information
++ that isn't appropriate for unprivileged users of the system. Sysfs and
++ debugfs have also become a large source of new vulnerabilities, ranging
++ from infoleaks to local compromise. There has been very little oversight with
++ an eye toward security involved in adding new exporters of information to these
++ filesystems, so their use is discouraged.
++ 
++ This is disabled by default as many programs (e.g. Xorg or debugging tools)
++ require access to sysfs/debugfs.
++ 
++ The kernel config option CONFIG_SECURITY_SYSFS_RESTRICT sets the default value
++ of sysfs_restrict.
++ 
++ 
+  suid_dumpable:
+  --------------
+  
+diff --color -rcNP clean/fs/debugfs/inode.c patched/fs/debugfs/inode.c
+*** clean/fs/debugfs/inode.c	2024-03-11 06:55:14.567605799 +0300
+--- patched/fs/debugfs/inode.c	2024-03-11 06:41:25.000636393 +0300
+***************
+*** 27,32 ****
+--- 27,33 ----
+  #include <linux/magic.h>
+  #include <linux/slab.h>
+  #include <linux/security.h>
++ #include <linux/sysfs.h>
+  
+  #include "internal.h"
+  
+diff --color -rcNP clean/fs/sysfs/dir.c patched/fs/sysfs/dir.c
+*** clean/fs/sysfs/dir.c	2019-11-25 03:32:01.000000000 +0300
+--- patched/fs/sysfs/dir.c	2024-03-11 06:43:40.334631402 +0300
+***************
+*** 32,37 ****
+--- 32,39 ----
+  	kfree(buf);
+  }
+  
++ int sysfs_restrict = IS_ENABLED(CONFIG_SECURITY_SYSFS_RESTRICT);
++ 
+  /**
+   * sysfs_create_dir_ns - create a directory for an object with a namespace tag
+   * @kobj: object we're creating directory for
+***************
+*** 40,45 ****
+--- 42,48 ----
+  int sysfs_create_dir_ns(struct kobject *kobj, const void *ns)
+  {
+  	struct kernfs_node *parent, *kn;
++ 	umode_t *mode = S_IRWXU;
+  	kuid_t uid;
+  	kgid_t gid;
+  
+***************
+*** 56,62 ****
+  
+  	kobject_get_ownership(kobj, &uid, &gid);
+  
+! 	kn = kernfs_create_dir_ns(parent, kobject_name(kobj),
+  				  S_IRWXU | S_IRUGO | S_IXUGO, uid, gid,
+  				  kobj, ns);
+  	if (IS_ERR(kn)) {
+--- 59,68 ----
+  
+  	kobject_get_ownership(kobj, &uid, &gid);
+  
+!  	if (!sysfs_restrict)
+! 		mode = S_IRWXU | S_IRUGO | S_IXUGO;
+! 
+! 		kn = kernfs_create_dir_ns(parent, kobject_name(kobj),
+  				  S_IRWXU | S_IRUGO | S_IXUGO, uid, gid,
+  				  kobj, ns);
+  	if (IS_ERR(kn)) {
+diff --color -rcNP clean/include/linux/sysfs.h patched/include/linux/sysfs.h
+*** clean/include/linux/sysfs.h	2024-03-11 06:55:15.607605760 +0300
+--- patched/include/linux/sysfs.h	2024-03-11 06:45:16.345627861 +0300
+***************
+*** 305,310 ****
+--- 305,312 ----
+  
+  int __must_check sysfs_init(void);
+  
++ extern int sysfs_restrict;
++ 
+  static inline void sysfs_enable_ns(struct kernfs_node *kn)
+  {
+  	return kernfs_enable_ns(kn);
+diff --color -rcNP clean/kernel/sysctl.c patched/kernel/sysctl.c
+*** clean/kernel/sysctl.c	2024-03-11 06:55:23.663605463 +0300
+--- patched/kernel/sysctl.c	2024-03-11 06:46:57.096624146 +0300
+***************
+*** 69,74 ****
+--- 69,75 ----
+  #include <linux/mount.h>
+  #include <linux/userfaultfd_k.h>
+  #include <linux/ipc.h>
++ #include <linux/sysfs.h>
+  
+  #include "../lib/kstrtox.h"
+  
+***************
+*** 2006,2011 ****
+--- 2007,2023 ----
+  		.extra1		= SYSCTL_ZERO,
+  		.extra2		= &two,
+  	},
++ #ifdef CONFIG_SYSFS
++ 	{
++ 		.procname	= "sysfs_restrict",
++ 		.data		= &sysfs_restrict,
++ 		.maxlen		= sizeof(int),
++ 		.mode		= 0600,
++ 		.proc_handler	= proc_dointvec_minmax_sysadmin,
++ 		.extra1		= SYSCTL_ZERO,
++ 		.extra2		= SYSCTL_ONE,
++ 	},
++ #endif
+  #if defined(CONFIG_BINFMT_MISC) || defined(CONFIG_BINFMT_MISC_MODULE)
+  	{
+  		.procname	= "binfmt_misc",
+diff --color -rcNP clean/security/Kconfig patched/security/Kconfig
+*** clean/security/Kconfig	2024-03-11 06:55:23.664605463 +0300
+--- patched/security/Kconfig	2024-03-11 06:48:11.067621418 +0300
+***************
+*** 63,68 ****
+--- 63,91 ----
+  	  kernel.modharden sysctl.
+  
+  	  If unsure say N.
++ 	  
++ config SECURITY_SYSFS_RESTRICT
++ 	bool "Sysfs/debugfs restriction"
++ 	default n
++ 	depends on SYSFS
++ 	help
++ 	  If you say Y here, sysfs (the pseudo-filesystem mounted at /sys) and
++ 	  any filesystem normally mounted under it (e.g. debugfs) will be
++ 		accessible only by root. These filesystems generally provide access
++ 	  to hardware and debug information that isn't appropriate for unprivileged
++ 		users of the system. Sysfs and debugfs have also become a large source
++ 	  of new vulnerabilities, ranging from infoleaks to local compromise.
++ 	  There has been very little oversight with an eye toward security involved
++ 	  in adding new exporters of information to these filesystems, so their
++ 	  use is discouraged.
++ 
++ 		This is disabled by default as many programs (e.g. Xorg or debugging tools)
++ 	  require access to sysfs/debugfs.
++ 
++ 	  This setting can be overridden at runtime via the
++ 	  fs.sysfs_restrict sysctl.
++ 
++ 	  If unsure say N.
+  
+  config SECURITY
+  	bool "Enable different security models"
