@@ -1,0 +1,1547 @@
+diff --color -rcNP /tmp/clean/arch/x86/entry/entry_32.S patched/arch/x86/entry/entry_32.S
+*** /tmp/clean/arch/x86/entry/entry_32.S	2024-03-11 07:03:21.105587855 +0300
+--- patched/arch/x86/entry/entry_32.S	2024-03-11 08:55:35.508339490 +0300
+***************
+*** 1079,1084 ****
+--- 1079,1089 ----
+  	call	do_int80_syscall_32
+  .Lsyscall_32_done:
+  
++ #ifdef CONFIG_PAX_RANDKSTACK
++ 	movl	%esp, %eax
++ 	call pax_randomize_kstack
++ #endif
++ 
+  	STACKLEAK_ERASE
+  
+  restore_all:
+diff --color -rcNP /tmp/clean/arch/x86/entry/entry_64.S patched/arch/x86/entry/entry_64.S
+*** /tmp/clean/arch/x86/entry/entry_64.S	2024-03-11 07:03:21.106587855 +0300
+--- patched/arch/x86/entry/entry_64.S	2024-03-11 09:02:06.645325065 +0300
+***************
+*** 53,58 ****
+--- 53,67 ----
+  END(native_usergs_sysret64)
+  #endif /* CONFIG_PARAVIRT */
+  
++ #ifdef CONFIG_PAX_RANDKSTACK
++ .macro PAX_RAND_KSTACK
++ 	movq	%rsp, %rdi
++ 	call	pax_randomize_kstack
++ 	movq    %rsp, %rdi
++ 	movq    %rax, %rsp
++ .endm
++ #endif
++ 
+  .macro TRACE_IRQS_FLAGS flags:req
+  #ifdef CONFIG_TRACE_IRQFLAGS
+  	btl	$9, \flags		/* interrupts off? */
+***************
+*** 170,183 ****
+  	TRACE_IRQS_OFF
+  
+  	/* IRQs are off. */
+  	movq	%rax, %rdi
+  	movq	%rsp, %rsi
+! 
+  	/* clobbers %rax, make sure it is after saving the syscall nr */
+  	IBRS_ENTER
+  
+  	call	do_syscall_64		/* returns with IRQs disabled */
+! 
+  	TRACE_IRQS_IRETQ		/* we're about to change IF */
+  
+  	/*
+--- 179,210 ----
+  	TRACE_IRQS_OFF
+  
+  	/* IRQs are off. */
++ 
++ 	/*
++ 	 * do_syscall_64 expects syscall-nr (pt_regs->orig_ax) as the first
++ 	 * argument (%rdi) and pointer to pt_regs as the second argument (%rsi).
++ 	 */
++ #ifdef CONFIG_PAX_RANDKSTACK
++ 	pushq	%rax
++ 	movq	%rsp, %rdi
++ 	call	pax_randomize_kstack
++ 	popq	%rdi
++ 	movq    %rsp, %rsi
++ 	movq    %rax, %rsp
++ 
++ 	pushq	%rsi
++ #else
+  	movq	%rax, %rdi
+  	movq	%rsp, %rsi
+! #endif
+  	/* clobbers %rax, make sure it is after saving the syscall nr */
+  	IBRS_ENTER
+  
+  	call	do_syscall_64		/* returns with IRQs disabled */
+! #ifdef CONFIG_PAX_RANDKSTACK
+! 	popq	%rsp
+! #endif
+! 	
+  	TRACE_IRQS_IRETQ		/* we're about to change IF */
+  
+  	/*
+***************
+*** 342,349 ****
+--- 369,385 ----
+  
+  2:
+  	UNWIND_HINT_REGS
++ #ifdef CONFIG_PAX_RANDKSTACK
++ 	PAX_RAND_KSTACK
++ 	pushq	%rdi
++ #else
+  	movq	%rsp, %rdi
++ #endif
+  	call	syscall_return_slowpath	/* returns with IRQs disabled */
++ #ifdef CONFIG_PAX_RANDKSTACK
++ 	popq	%rsp
++ #endif
++ 
+  	TRACE_IRQS_ON			/* user mode is traced as IRQS on */
+  	jmp	swapgs_restore_regs_and_return_to_usermode
+  
+diff --color -rcNP /tmp/clean/arch/x86/entry/vdso/vma.c patched/arch/x86/entry/vdso/vma.c
+*** /tmp/clean/arch/x86/entry/vdso/vma.c	2024-03-11 07:03:21.104587855 +0300
+--- patched/arch/x86/entry/vdso/vma.c	2024-03-11 09:03:45.816321407 +0300
+***************
+*** 200,205 ****
+--- 200,214 ----
+  #ifdef CONFIG_X86_64
+  static int map_vdso_randomized(const struct vdso_image *image)
+  {
++ 		unsigned long addr;
++ 
++ #ifdef CONFIG_PAX_RANDMMAP
++ 	if (current->mm->pax_flags & MF_PAX_RANDMMAP)
++ 		addr = 0;
++ 	else
++ #endif
++ 	addr = vdso_addr(current->mm->start_stack, image->size-image->sym_vvar_start);
++ 
+  	return map_vdso(image, 0);
+  }
+  #endif
+diff --color -rcNP /tmp/clean/arch/x86/include/asm/elf.h patched/arch/x86/include/asm/elf.h
+*** /tmp/clean/arch/x86/include/asm/elf.h	2024-03-11 07:03:21.261587849 +0300
+--- patched/arch/x86/include/asm/elf.h	2024-03-11 09:04:42.678319310 +0300
+***************
+*** 260,265 ****
+--- 260,279 ----
+  
+  #define ELF_HWCAP		(boot_cpu_data.x86_capability[CPUID_1_EDX])
+  
++ #ifdef CONFIG_PAX_ASLR
++ #ifdef CONFIG_X86_32
++ #define PAX_ELF_ET_DYN_BASE	0x10000000UL
++ 
++ #define PAX_DELTA_MMAP_LEN	(current->mm->pax_flags & MF_PAX_SEGMEXEC ? 15 : 16)
++ #define PAX_DELTA_STACK_LEN	(current->mm->pax_flags & MF_PAX_SEGMEXEC ? 15 : 16)
++ #else
++ #define PAX_ELF_ET_DYN_BASE	0x400000UL
++ 
++ #define PAX_DELTA_MMAP_LEN	((test_thread_flag(TIF_ADDR32)) ? 16 : TASK_SIZE_MAX_SHIFT - PAGE_SHIFT - 3)
++ #define PAX_DELTA_STACK_LEN	((test_thread_flag(TIF_ADDR32)) ? 16 : TASK_SIZE_MAX_SHIFT - PAGE_SHIFT - 3)
++ #endif
++ #endif
++ 
+  extern u32 elf_hwcap2;
+  
+  /*
+diff --color -rcNP /tmp/clean/arch/x86/include/asm/pgtable.h patched/arch/x86/include/asm/pgtable.h
+*** /tmp/clean/arch/x86/include/asm/pgtable.h	2024-03-11 07:03:21.250587850 +0300
+--- patched/arch/x86/include/asm/pgtable.h	2024-03-11 09:05:49.732316837 +0300
+***************
+*** 1470,1473 ****
+--- 1470,1475 ----
+  #include <asm-generic/pgtable.h>
+  #endif	/* __ASSEMBLY__ */
+  
++ #define TASK_SIZE_MAX_SHIFT CONFIG_TASK_SIZE_MAX_SHIFT
++ 
+  #endif /* _ASM_X86_PGTABLE_H */
+diff --color -rcNP /tmp/clean/arch/x86/kernel/process.c patched/arch/x86/kernel/process.c
+*** /tmp/clean/arch/x86/kernel/process.c	2024-03-11 07:03:21.487587841 +0300
+--- patched/arch/x86/kernel/process.c	2024-03-11 09:07:03.342314123 +0300
+***************
+*** 875,877 ****
+--- 875,901 ----
+  
+  	return -EINVAL;
+  }
++ 
++ #ifdef CONFIG_PAX_RANDKSTACK
++ unsigned long pax_randomize_kstack(struct pt_regs *regs)
++ {
++ 	unsigned long time;
++ 	unsigned long sp1;
++ 
++ 	if (!randomize_va_space)
++ 		return (unsigned long)regs;
++ 
++ 	/* P4 seems to return a 0 LSB, ignore it */
++ #ifdef CONFIG_MPENTIUM4
++ 	time = rdtsc() & 0x3EUL;
++ 	sp1 = (unsigned long)regs - (time << 2);
++ #elif defined(CONFIG_X86_64)
++ 	time = rdtsc() & 0xFUL;
++ 	sp1 = (unsigned long)regs - (time << 4);
++ #else
++ 	time = rdtsc() & 0x1FUL;
++ 	sp1 = (unsigned long)regs - (time << 3);
++ #endif
++ 	return sp1;
++ }
++ #endif
+diff --color -rcNP /tmp/clean/arch/x86/kernel/sys_x86_64.c patched/arch/x86/kernel/sys_x86_64.c
+*** /tmp/clean/arch/x86/kernel/sys_x86_64.c	2024-03-11 07:03:21.488587841 +0300
+--- patched/arch/x86/kernel/sys_x86_64.c	2024-03-11 09:08:28.449310984 +0300
+***************
+*** 135,140 ****
+--- 135,144 ----
+  
+  	if (len > end)
+  		return -ENOMEM;
++ 		
++ #ifdef CONFIG_PAX_RANDMMAP
++ 	if (!(mm->pax_flags & MF_PAX_RANDMMAP))
++ #endif
+  
+  	if (addr) {
+  		addr = PAGE_ALIGN(addr);
+***************
+*** 182,188 ****
+  	/* for MAP_32BIT mappings we force the legacy mmap base */
+  	if (!in_32bit_syscall() && (flags & MAP_32BIT))
+  		goto bottomup;
+! 
+  	/* requesting a specific address */
+  	if (addr) {
+  		addr &= PAGE_MASK;
+--- 186,196 ----
+  	/* for MAP_32BIT mappings we force the legacy mmap base */
+  	if (!in_32bit_syscall() && (flags & MAP_32BIT))
+  		goto bottomup;
+! 		
+! #ifdef CONFIG_PAX_RANDMMAP
+! 	if (!(mm->pax_flags & MF_PAX_RANDMMAP))
+! #endif
+! 	
+  	/* requesting a specific address */
+  	if (addr) {
+  		addr &= PAGE_MASK;
+diff --color -rcNP /tmp/clean/arch/x86/mm/fault.c patched/arch/x86/mm/fault.c
+*** /tmp/clean/arch/x86/mm/fault.c	2024-03-11 07:03:21.597587837 +0300
+--- patched/arch/x86/mm/fault.c	2024-03-11 09:10:43.332306009 +0300
+***************
+*** 142,147 ****
+--- 142,152 ----
+  	return prefetch;
+  }
+  
++ #ifdef CONFIG_PAX_EMUTRAMP
++ static bool pax_is_fetch_fault(struct pt_regs *regs, unsigned long error_code, unsigned long address);
++ static int pax_handle_fetch_fault(struct pt_regs *regs);
++ #endif
++ 
+  DEFINE_SPINLOCK(pgd_lock);
+  LIST_HEAD(pgd_list);
+  
+***************
+*** 907,912 ****
+--- 912,924 ----
+  		if (is_errata100(regs, address))
+  			return;
+  
++ #ifdef CONFIG_PAX_EMUTRAMP
++ 		if (pax_is_fetch_fault(regs, error_code, address)) {
++ 			if (pax_handle_fetch_fault(regs) == 2)
++ 				return;
++ 			do_group_exit(SIGKILL);
++ 		}
++ #endif
+  		/*
+  		 * To avoid leaking information about the kernel page table
+  		 * layout, pretend that user-mode accesses to kernel addresses
+***************
+*** 1553,1555 ****
+--- 1565,1773 ----
+  	exception_exit(prev_state);
+  }
+  NOKPROBE_SYMBOL(do_page_fault);
++ 
++ #ifdef CONFIG_PAX_EMUTRAMP
++ static bool pax_is_fetch_fault(struct pt_regs *regs, unsigned long error_code, unsigned long address)
++ {
++ 	unsigned long ip = regs->ip;
++ 
++ 	if (v8086_mode(regs))
++ 		ip = ((regs->cs & 0xffff) << 4) + (ip & 0xffff);
++ 
++ 	if ((__supported_pte_mask & _PAGE_NX) && (error_code & X86_PF_INSTR))
++ 		return true;
++ 	if (!(error_code & (X86_PF_PROT | X86_PF_WRITE)) && ip == address)
++ 		return true;
++ 	return false;
++ }
++ 
++ static int pax_handle_fetch_fault_32(struct pt_regs *regs)
++ {
++ 	int err;
++ 
++ 	do { /* PaX: libffi trampoline emulation */
++ 		unsigned char mov, jmp;
++ 		unsigned int addr1, addr2;
++ 
++ #ifdef CONFIG_X86_64
++ 		if ((regs->ip + 9) >> 32)
++ 			break;
++ #endif
++ 
++ 		err = get_user(mov, (unsigned char __user *)regs->ip);
++ 		err |= get_user(addr1, (unsigned int __user *)(regs->ip + 1));
++ 		err |= get_user(jmp, (unsigned char __user *)(regs->ip + 5));
++ 		err |= get_user(addr2, (unsigned int __user *)(regs->ip + 6));
++ 
++ 		if (err)
++ 			break;
++ 
++ 		if (mov == 0xB8 && jmp == 0xE9) {
++ 			regs->ax = addr1;
++ 			regs->ip = (unsigned int)(regs->ip + addr2 + 10);
++ 			return 2;
++ 		}
++ 	} while (0);
++ 
++ 	do { /* PaX: gcc trampoline emulation #1 */
++ 		unsigned char mov1, mov2;
++ 		unsigned short jmp;
++ 		unsigned int addr1, addr2;
++ 
++ #ifdef CONFIG_X86_64
++ 		if ((regs->ip + 11) >> 32)
++ 			break;
++ #endif
++ 
++ 		err = get_user(mov1, (unsigned char __user *)regs->ip);
++ 		err |= get_user(addr1, (unsigned int __user *)(regs->ip + 1));
++ 		err |= get_user(mov2, (unsigned char __user *)(regs->ip + 5));
++ 		err |= get_user(addr2, (unsigned int __user *)(regs->ip + 6));
++ 		err |= get_user(jmp, (unsigned short __user *)(regs->ip + 10));
++ 
++ 		if (err)
++ 			break;
++ 
++ 		if (mov1 == 0xB9 && mov2 == 0xB8 && jmp == 0xE0FF) {
++ 			regs->cx = addr1;
++ 			regs->ax = addr2;
++ 			regs->ip = addr2;
++ 			return 2;
++ 		}
++ 	} while (0);
++ 
++ 	do { /* PaX: gcc trampoline emulation #2 */
++ 		unsigned char mov, jmp;
++ 		unsigned int addr1, addr2;
++ 
++ #ifdef CONFIG_X86_64
++ 		if ((regs->ip + 9) >> 32)
++ 			break;
++ #endif
++ 
++ 		err = get_user(mov, (unsigned char __user *)regs->ip);
++ 		err |= get_user(addr1, (unsigned int __user *)(regs->ip + 1));
++ 		err |= get_user(jmp, (unsigned char __user *)(regs->ip + 5));
++ 		err |= get_user(addr2, (unsigned int __user *)(regs->ip + 6));
++ 
++ 		if (err)
++ 			break;
++ 
++ 		if (mov == 0xB9 && jmp == 0xE9) {
++ 			regs->cx = addr1;
++ 			regs->ip = (unsigned int)(regs->ip + addr2 + 10);
++ 			return 2;
++ 		}
++ 	} while (0);
++ 
++ 	return 1; /* PaX in action */
++ }
++ 
++ #ifdef CONFIG_X86_64
++ static int pax_handle_fetch_fault_64(struct pt_regs *regs)
++ {
++ 	int err;
++ 
++ 	do { /* PaX: libffi trampoline emulation */
++ 		unsigned short mov1, mov2, jmp1;
++ 		unsigned char stcclc, jmp2;
++ 		unsigned long addr1, addr2;
++ 
++ 		err = get_user(mov1, (unsigned short __user *)regs->ip);
++ 		err |= get_user(addr1, (unsigned long __user *)(regs->ip + 2));
++ 		err |= get_user(mov2, (unsigned short __user *)(regs->ip + 10));
++ 		err |= get_user(addr2, (unsigned long __user *)(regs->ip + 12));
++ 		err |= get_user(stcclc, (unsigned char __user *)(regs->ip + 20));
++ 		err |= get_user(jmp1, (unsigned short __user *)(regs->ip + 21));
++ 		err |= get_user(jmp2, (unsigned char __user *)(regs->ip + 23));
++ 
++ 		if (err)
++ 			break;
++ 
++ 		if (mov1 == 0xBB49 && mov2 == 0xBA49 && (stcclc == 0xF8 || stcclc == 0xF9) && jmp1 == 0xFF49 && jmp2 == 0xE3) {
++ 			regs->r11 = addr1;
++ 			regs->r10 = addr2;
++ 			if (stcclc == 0xF8)
++ 				regs->flags &= ~X86_EFLAGS_CF;
++ 			else
++ 				regs->flags |= X86_EFLAGS_CF;
++ 			regs->ip = addr1;
++ 			return 2;
++ 		}
++ 	} while (0);
++ 
++ 	do { /* PaX: gcc trampoline emulation #1 */
++ 		unsigned short mov1, mov2, jmp1;
++ 		unsigned char jmp2;
++ 		unsigned int addr1;
++ 		unsigned long addr2;
++ 
++ 		err = get_user(mov1, (unsigned short __user *)regs->ip);
++ 		err |= get_user(addr1, (unsigned int __user *)(regs->ip + 2));
++ 		err |= get_user(mov2, (unsigned short __user *)(regs->ip + 6));
++ 		err |= get_user(addr2, (unsigned long __user *)(regs->ip + 8));
++ 		err |= get_user(jmp1, (unsigned short __user *)(regs->ip + 16));
++ 		err |= get_user(jmp2, (unsigned char __user *)(regs->ip + 18));
++ 
++ 		if (err)
++ 			break;
++ 
++ 		if (mov1 == 0xBB41 && mov2 == 0xBA49 && jmp1 == 0xFF49 && jmp2 == 0xE3) {
++ 			regs->r11 = addr1;
++ 			regs->r10 = addr2;
++ 			regs->ip = addr1;
++ 			return 2;
++ 		}
++ 	} while (0);
++ 
++ 	do { /* PaX: gcc trampoline emulation #2 */
++ 		unsigned short mov1, mov2, jmp1;
++ 		unsigned char jmp2;
++ 		unsigned long addr1, addr2;
++ 
++ 		err = get_user(mov1, (unsigned short __user *)regs->ip);
++ 		err |= get_user(addr1, (unsigned long __user *)(regs->ip + 2));
++ 		err |= get_user(mov2, (unsigned short __user *)(regs->ip + 10));
++ 		err |= get_user(addr2, (unsigned long __user *)(regs->ip + 12));
++ 		err |= get_user(jmp1, (unsigned short __user *)(regs->ip + 20));
++ 		err |= get_user(jmp2, (unsigned char __user *)(regs->ip + 22));
++ 
++ 		if (err)
++ 			break;
++ 
++ 		if (mov1 == 0xBB49 && mov2 == 0xBA49 && jmp1 == 0xFF49 && jmp2 == 0xE3) {
++ 			regs->r11 = addr1;
++ 			regs->r10 = addr2;
++ 			regs->ip = addr1;
++ 			return 2;
++ 		}
++ 	} while (0);
++ 
++ 	return 1; /* PaX in action */
++ }
++ #endif
++ 
++ /*
++  * PaX: decide what to do with offenders (regs->ip = fault address)
++  *
++  * returns 1 when task should be killed
++  *         2 when gcc trampoline was detected
++  */
++ static int pax_handle_fetch_fault(struct pt_regs *regs)
++ {
++ 	if (v8086_mode(regs))
++ 		return 1;
++ 
++ 	if (!(current->mm->pax_flags & MF_PAX_EMUTRAMP))
++ 		return 1;
++ 
++ #ifdef CONFIG_X86_32
++ 	return pax_handle_fetch_fault_32(regs);
++ #else
++ 	if (regs->cs == __USER32_CS || (regs->cs & SEGMENT_LDT))
++ 		return pax_handle_fetch_fault_32(regs);
++ 	else
++ 		return pax_handle_fetch_fault_64(regs);
++ #endif
++ }
++ #endif
+\ No newline at end of file
+diff --color -rcNP /tmp/clean/arch/x86/mm/hugetlbpage.c patched/arch/x86/mm/hugetlbpage.c
+*** /tmp/clean/arch/x86/mm/hugetlbpage.c	2024-03-11 07:03:21.589587837 +0300
+--- patched/arch/x86/mm/hugetlbpage.c	2024-03-11 09:22:35.531279743 +0300
+***************
+*** 133,138 ****
+--- 133,144 ----
+  		VM_BUG_ON(addr != -ENOMEM);
+  		info.flags = 0;
+  		info.low_limit = TASK_UNMAPPED_BASE;
++ 
++ #ifdef CONFIG_PAX_RANDMMAP
++ 		if (current->mm->pax_flags & MF_PAX_RANDMMAP)
++ 			info.low_limit += current->mm->delta_mmap;
++ #endif
++ 
+  		info.high_limit = TASK_SIZE_LOW;
+  		addr = vm_unmapped_area(&info);
+  	}
+***************
+*** 165,170 ****
+--- 171,180 ----
+  		return addr;
+  	}
+  
++ #ifdef CONFIG_PAX_RANDMMAP
++ 	if (!(mm->pax_flags & MF_PAX_RANDMMAP))
++ #endif
++ 	
+  	if (addr) {
+  		addr &= huge_page_mask(h);
+  		if (!mmap_address_hint_valid(addr, len))
+diff --color -rcNP /tmp/clean/arch/x86/mm/mmap.c patched/arch/x86/mm/mmap.c
+*** /tmp/clean/arch/x86/mm/mmap.c	2024-03-11 07:03:21.591587837 +0300
+--- patched/arch/x86/mm/mmap.c	2024-03-11 09:24:01.356276578 +0300
+***************
+*** 126,136 ****
+--- 126,147 ----
+  
+  void arch_pick_mmap_layout(struct mm_struct *mm, struct rlimit *rlim_stack)
+  {
++ #ifdef CONFIG_PAX_RANDMMAP
++ 	if (!(mm->pax_flags & MF_PAX_RANDMMAP))
++ #endif
++ 	
+  	if (mmap_is_legacy())
+  		mm->get_unmapped_area = arch_get_unmapped_area;
+  	else
+  		mm->get_unmapped_area = arch_get_unmapped_area_topdown;
+  
++ #ifdef CONFIG_PAX_RANDMMAP
++ 	if (mm->pax_flags & MF_PAX_RANDMMAP) {
++ 		mm->mmap_legacy_base += mm->delta_mmap;
++ 		mm->mmap_base -= mm->delta_mmap + mm->delta_stack;
++ 	}
++ #endif
++ 	
+  	arch_pick_mmap_base(&mm->mmap_base, &mm->mmap_legacy_base,
+  			arch_rnd(mmap64_rnd_bits), task_size_64bit(0),
+  			rlim_stack);
+diff --color -rcNP /tmp/clean/fs/binfmt_elf.c patched/fs/binfmt_elf.c
+*** /tmp/clean/fs/binfmt_elf.c	2024-03-11 07:03:44.310586999 +0300
+--- patched/fs/binfmt_elf.c	2024-03-11 10:11:55.361170585 +0300
+***************
+*** 41,46 ****
+--- 41,47 ----
+  #include <linux/sched/cputime.h>
+  #include <linux/cred.h>
+  #include <linux/dax.h>
++ #include <linux/xattr.h>
+  #include <linux/uaccess.h>
+  #include <asm/param.h>
+  #include <asm/page.h>
+***************
+*** 75,80 ****
+--- 76,85 ----
+  #define elf_core_dump	NULL
+  #endif
+  
++ #ifdef CONFIG_PAX_MPROTECT
++ static void elf_handle_mprotect(struct vm_area_struct *vma, unsigned long newflags);
++ #endif
++ 
+  #if ELF_EXEC_PAGESIZE > PAGE_SIZE
+  #define ELF_MIN_ALIGN	ELF_EXEC_PAGESIZE
+  #else
+***************
+*** 851,856 ****
+--- 856,883 ----
+  	/* Do this immediately, since STACK_TOP as used in setup_arg_pages
+  	   may depend on the personality.  */
+  	SET_PERSONALITY2(loc->elf_ex, &arch_state);
++ #if defined(CONFIG_PAX)
++ 	current->mm->pax_flags = 0UL;
++ #ifdef CONFIG_PAX_ASLR
++ 	current->mm->delta_mmap = 0UL;
++ 	current->mm->delta_stack = 0UL;
++ #endif
++ #if defined(CONFIG_PAX_NOWRITEEXEC)
++ 	if (executable_stack == EXSTACK_ENABLE_X)
++ 	{
++ #if defined(CONFIG_PAX_EMUTRAMP)
++ 		executable_stack = EXSTACK_DISABLE_X;
++ 		current->mm->pax_flags |= MF_PAX_EMUTRAMP;
++ #endif
++ 	}
++ #endif
++ #ifdef CONFIG_PAX_ASLR
++ 	if (current->mm->pax_flags & MF_PAX_RANDMMAP) {
++ 		current->mm->delta_mmap = (pax_get_random_long() & ((1UL << PAX_DELTA_MMAP_LEN)-1)) << PAGE_SHIFT;
++ 		current->mm->delta_stack = (pax_get_random_long() & ((1UL << PAX_DELTA_STACK_LEN)-1)) << PAGE_SHIFT;
++ 	}
++ #endif
++ #endif
+  	if (elf_read_implies_exec(loc->elf_ex, executable_stack))
+  		current->personality |= READ_IMPLIES_EXEC;
+  
+***************
+*** 972,977 ****
+--- 999,1013 ----
+  			 */
+  			load_bias = ELF_PAGESTART(load_bias - vaddr);
+  
++ #ifdef CONFIG_PAX_RANDMMAP
++ 			/* PaX: randomize base address at the default exe base if requested */
++ 			if ((current->mm->pax_flags & MF_PAX_RANDMMAP) && interpreter) {
++ 				load_bias = (pax_get_random_long() & ((1UL << PAX_DELTA_MMAP_LEN) - 1)) << PAGE_SHIFT;
++ 				load_bias = ELF_PAGESTART(PAX_ELF_ET_DYN_BASE - vaddr + load_bias);
++ 				elf_flags |= MAP_FIXED;
++ 			}
++ #endif
++ 			
+  			total_size = total_mapping_size(elf_phdata,
+  							loc->elf_ex.e_phnum);
+  			if (!total_size) {
+***************
+*** 1053,1058 ****
+--- 1089,1121 ----
+  		goto out_free_dentry;
+  	}
+  
++ #ifdef CONFIG_PAX_RANDMMAP
++ 	if (current->mm->pax_flags & MF_PAX_RANDMMAP) {
++ 		unsigned long start, size, flags;
++ 		vm_flags_t vm_flags;
++ 
++ 		start = ELF_PAGEALIGN(elf_brk);
++ 		size = PAGE_SIZE + ((pax_get_random_long() & ((1UL << 22) - 1UL)) << 4);
++ 		flags = MAP_FIXED | MAP_PRIVATE;
++ 		vm_flags = VM_DONTEXPAND | VM_DONTDUMP;
++ 
++ 		down_write(&current->mm->mmap_sem);
++ 		start = get_unmapped_area(NULL, start, PAGE_ALIGN(size), 0, flags);
++ 		retval = -ENOMEM;
++ 		if (!IS_ERR_VALUE(start) && !find_vma_intersection(current->mm, start, start + size + PAGE_SIZE)) {
++ //			if (current->personality & ADDR_NO_RANDOMIZE)
++ //				vm_flags |= VM_READ | VM_MAYREAD;
++ 			start = mmap_region(NULL, start, PAGE_ALIGN(size), vm_flags, 0, NULL);
++ 			retval = IS_ERR_VALUE(start) ? start : 0;
++ 		}
++ 		up_write(&current->mm->mmap_sem);
++ 		if (retval == 0)
++ 			retval = set_brk(start + size, start + size + PAGE_SIZE, 0);
++ 		if (retval < 0)
++ 			goto out_free_dentry;
++ 	}
++ #endif
++ 	
+  	if (interpreter) {
+  		unsigned long interp_map_addr = 0;
+  
+***************
+*** 1106,1111 ****
+--- 1169,1175 ----
+  	current->mm->end_data = end_data;
+  	current->mm->start_stack = bprm->p;
+  
++ #ifndef CONFIG_PAX_RANDMMAP
+  	if ((current->flags & PF_RANDOMIZE) && (randomize_va_space > 1)) {
+  		/*
+  		 * For architectures with ELF randomization, when executing
+***************
+*** 1125,1131 ****
+  		current->brk_randomized = 1;
+  #endif
+  	}
+! 
+  	if (current->personality & MMAP_PAGE_ZERO) {
+  		/* Why this, you ask???  Well SVr4 maps page 0 as read-only,
+  		   and some applications "depend" upon this behavior.
+--- 1189,1195 ----
+  		current->brk_randomized = 1;
+  #endif
+  	}
+! #endif
+  	if (current->personality & MMAP_PAGE_ZERO) {
+  		/* Why this, you ask???  Well SVr4 maps page 0 as read-only,
+  		   and some applications "depend" upon this behavior.
+***************
+*** 2383,2388 ****
+--- 2447,2502 ----
+  
+  #endif		/* CONFIG_ELF_CORE */
+  
++ #ifdef CONFIG_PAX_MPROTECT
++ /* PaX: non-PIC ELF libraries need relocations on their executable segments
++  * therefore we'll grant them VM_MAYWRITE once during their life. Similarly
++  * we'll remove VM_MAYWRITE for good on RELRO segments.
++  *
++  * The checks favour ld-linux.so behaviour which operates on a per ELF segment
++  * basis because we want to allow the common case and not the special ones.
++  */
++ static void elf_handle_mprotect(struct vm_area_struct *vma, unsigned long newflags)
++ {
++ 	struct elfhdr elf_h;
++ 	struct elf_phdr elf_p;
++ 	unsigned long i;
++ 	unsigned long oldflags;
++ 	bool is_relro;
++ 
++ 	if (!vma->vm_file)
++ 		return;
++ 
++ 	oldflags = vma->vm_flags & (VM_MAYEXEC | VM_MAYWRITE | VM_MAYREAD | VM_EXEC | VM_WRITE | VM_READ);
++ 	newflags &= VM_MAYEXEC | VM_MAYWRITE | VM_MAYREAD | VM_EXEC | VM_WRITE | VM_READ;
++ 
++ 	/* possible RELRO */
++ 	is_relro = vma->anon_vma && oldflags == (VM_MAYWRITE | VM_MAYREAD | VM_READ) && newflags == (VM_MAYWRITE | VM_MAYREAD | VM_READ);
++ 
++ 	if (!is_relro)
++ 		return;
++ 
++ 	if (sizeof(elf_h) != kernel_read(vma->vm_file, 0UL, (char *)&elf_h, sizeof(elf_h)) ||
++ 	    memcmp(elf_h.e_ident, ELFMAG, SELFMAG) ||
++ 	    (elf_h.e_type != ET_DYN && elf_h.e_type != ET_EXEC) ||
++ 	    !elf_check_arch(&elf_h) ||
++ 	    elf_h.e_phentsize != sizeof(struct elf_phdr) ||
++ 	    elf_h.e_phnum > 65536UL / sizeof(struct elf_phdr))
++ 		return;
++ 
++ 	for (i = 0UL; i < elf_h.e_phnum; i++) {
++ 		if (sizeof(elf_p) != kernel_read(vma->vm_file, elf_h.e_phoff + i*sizeof(elf_p), (char *)&elf_p, sizeof(elf_p)))
++ 			return;
++ 		if (elf_p.p_type == PT_GNU_RELRO) {
++ 			if (!is_relro)
++ 				continue;
++ 			if ((elf_p.p_offset >> PAGE_SHIFT) == vma->vm_pgoff && ELF_PAGEALIGN(elf_p.p_memsz) == vma->vm_end - vma->vm_start)
++ 				vma->vm_flags &= ~VM_MAYWRITE;
++ 			is_relro = false;
++ 		}
++ 	}
++ }
++ #endif
++ 
+  static int __init init_elf_binfmt(void)
+  {
+  	register_binfmt(&elf_format);
+diff --color -rcNP /tmp/clean/fs/exec.c patched/fs/exec.c
+*** /tmp/clean/fs/exec.c	2024-03-11 07:03:44.448586994 +0300
+--- patched/fs/exec.c	2024-03-11 10:15:39.926162303 +0300
+***************
+*** 279,284 ****
+--- 279,288 ----
+  	bprm->p = vma->vm_end - sizeof(void *);
+  	if (!(current->personality & ADDR_NO_RANDOMIZE) && randomize_va_space)
+  		bprm->p ^= get_random_int() & ~PAGE_MASK;
++ #ifdef CONFIG_PAX_RANDUSTACK
++ 	if (randomize_va_space)
++ 		bprm->p ^= prandom_u32() & ~PAGE_MASK;
++ #endif
+  	return 0;
+  err:
+  	up_write(&mm->mmap_sem);
+***************
+*** 764,770 ****
+--- 768,779 ----
+  	if (unlikely(executable_stack == EXSTACK_ENABLE_X))
+  		vm_flags |= VM_EXEC;
+  	else if (executable_stack == EXSTACK_DISABLE_X)
++ 	{
+  		vm_flags &= ~VM_EXEC;
++ #ifdef CONFIG_PAX_MPROTECT
++ 		vm_flags &= ~VM_MAYEXEC;
++ #endif
++ 	}
+  	vm_flags |= mm->def_flags;
+  	vm_flags |= VM_STACK_INCOMPLETE_SETUP;
+  
+***************
+*** 804,809 ****
+--- 813,838 ----
+  #endif
+  	current->mm->start_stack = bprm->p;
+  	ret = expand_stack(vma, stack_base);
++ #if !defined(CONFIG_STACK_GROWSUP) && defined(CONFIG_PAX_RANDMMAP)
++ 	if (!ret && (mm->pax_flags & MF_PAX_RANDMMAP) && STACK_TOP <= 0xFFFFFFFFU && STACK_TOP > vma->vm_end) {
++ 		unsigned long size;
++ 		vm_flags_t vm_flags;
++ 
++ 		size = STACK_TOP - vma->vm_end;
++ 		vm_flags = VM_NONE | VM_DONTEXPAND | VM_DONTDUMP;
++ 
++ 		ret = vma->vm_end != mmap_region(NULL, vma->vm_end, size, vm_flags, 0, NULL);
++ 
++ #ifdef CONFIG_X86
++ 		if (!ret) {
++ 			size = PAGE_SIZE + mmap_min_addr + ((mm->delta_mmap ^ mm->delta_stack) & (0xFFUL << PAGE_SHIFT));
++ 			ret = 0 != mmap_region(NULL, 0, PAGE_ALIGN(size), vm_flags, 0, NULL);
++ 		}
++ #endif
++ 
++ 	}
++ #endif
++ 
+  	if (ret)
+  		ret = -EFAULT;
+  
+diff --color -rcNP /tmp/clean/fs/fs_struct.c patched/fs/fs_struct.c
+*** /tmp/clean/fs/fs_struct.c	2024-03-11 07:03:43.443587031 +0300
+--- patched/fs/fs_struct.c	2024-03-11 10:16:05.034161377 +0300
+***************
+*** 164,168 ****
+  	.users		= 1,
+  	.lock		= __SPIN_LOCK_UNLOCKED(init_fs.lock),
+  	.seq		= SEQCNT_ZERO(init_fs.seq),
+! 	.umask		= 0022,
+  };
+--- 164,168 ----
+  	.users		= 1,
+  	.lock		= __SPIN_LOCK_UNLOCKED(init_fs.lock),
+  	.seq		= SEQCNT_ZERO(init_fs.seq),
+! 	.umask		= 0077,
+  };
+diff --color -rcNP /tmp/clean/fs/hugetlbfs/inode.c patched/fs/hugetlbfs/inode.c
+*** /tmp/clean/fs/hugetlbfs/inode.c	2024-03-11 07:03:43.525587028 +0300
+--- patched/fs/hugetlbfs/inode.c	2024-03-11 10:20:41.124151194 +0300
+***************
+*** 211,216 ****
+--- 211,222 ----
+  	info.flags = 0;
+  	info.length = len;
+  	info.low_limit = current->mm->mmap_base;
++ 	
++ #ifdef CONFIG_PAX_RANDMMAP
++ 	if (mm->pax_flags & MF_PAX_RANDMMAP)
++ 		info.low_limit += mm->delta_mmap;
++ #endif
++ 	
+  	info.high_limit = arch_get_mmap_end(addr);
+  	info.align_mask = PAGE_MASK & ~huge_page_mask(h);
+  	info.align_offset = 0;
+***************
+*** 268,274 ****
+  			return -EINVAL;
+  		return addr;
+  	}
+! 
+  	if (addr) {
+  		addr = ALIGN(addr, huge_page_size(h));
+  		vma = find_vma(mm, addr);
+--- 274,284 ----
+  			return -EINVAL;
+  		return addr;
+  	}
+! 	
+! #ifdef CONFIG_PAX_RANDMMAP
+! 	if (!(mm->pax_flags & MF_PAX_RANDMMAP))
+! #endif
+! 	
+  	if (addr) {
+  		addr = ALIGN(addr, huge_page_size(h));
+  		vma = find_vma(mm, addr);
+diff --color -rcNP /tmp/clean/fs/namei.c patched/fs/namei.c
+*** /tmp/clean/fs/namei.c	2024-03-11 07:03:44.450586994 +0300
+--- patched/fs/namei.c	2024-03-11 10:21:58.100148356 +0300
+***************
+*** 2981,2986 ****
+--- 2981,2993 ----
+  		break;
+  	}
+  
++ 	if ((acc_mode & MAY_OPENEXEC)
++ 			&& (S_ISREG(inode->i_mode) || S_ISDIR(inode->i_mode))
++ 			&& (path->mnt && (path->mnt->mnt_flags & MNT_NOEXEC)))
++ 		return -EACCES;
++ 
++ 	acc_mode &= ~MAY_OPENEXEC;
++ 	
+  	error = inode_permission(inode, MAY_OPEN | acc_mode);
+  	if (error)
+  		return error;
+diff --color -rcNP /tmp/clean/fs/open.c patched/fs/open.c
+*** /tmp/clean/fs/open.c	2024-03-11 07:03:44.409586996 +0300
+--- patched/fs/open.c	2024-03-11 10:23:25.067145148 +0300
+***************
+*** 1005,1010 ****
+--- 1005,1014 ----
+  	if (flags & O_APPEND)
+  		acc_mode |= MAY_APPEND;
+  
++ /* Check exec permissions on open() */
++ 	if (flags & O_MAYEXEC)
++ 		acc_mode |= MAY_OPENEXEC;
++ 
+  	op->acc_mode = acc_mode;
+  
+  	op->intent = flags & O_PATH ? 0 : LOOKUP_OPEN;
+diff --color -rcNP /tmp/clean/fs/proc/array.c patched/fs/proc/array.c
+*** /tmp/clean/fs/proc/array.c	2024-03-11 07:03:43.934587013 +0300
+--- patched/fs/proc/array.c	2024-03-11 10:25:06.630141403 +0300
+***************
+*** 401,406 ****
+--- 401,421 ----
+  	seq_printf(m, "THP_enabled:\t%d\n", thp_enabled);
+  }
+  
++ #if defined(CONFIG_PAX_NOWRITEEXEC) || defined(CONFIG_PAX_ASLR)
++ static inline void task_pax(struct seq_file *m, struct task_struct *p)
++ {
++ 	if (p->mm)
++ 		seq_printf(m, "PaX:\t%c%c%c%c%c\n",
++ 			   p->mm->pax_flags & MF_PAX_PAGEEXEC ? 'P' : 'p',
++ 			   p->mm->pax_flags & MF_PAX_EMUTRAMP ? 'E' : 'e',
++ 			   p->mm->pax_flags & MF_PAX_MPROTECT ? 'M' : 'm',
++ 			   p->mm->pax_flags & MF_PAX_RANDMMAP ? 'R' : 'r',
++ 			   p->mm->pax_flags & MF_PAX_SEGMEXEC ? 'S' : 's');
++ 	else
++ 		seq_printf(m, "PaX:\t-----\n");
++ }
++ #endif
++ 
+  int proc_pid_status(struct seq_file *m, struct pid_namespace *ns,
+  			struct pid *pid, struct task_struct *task)
+  {
+***************
+*** 424,429 ****
+--- 439,447 ----
+  	task_cpus_allowed(m, task);
+  	cpuset_task_status_allowed(m, task);
+  	task_context_switch_counts(m, task);
++ #if defined(CONFIG_PAX_NOWRITEEXEC) || defined(CONFIG_PAX_ASLR)
++ 	task_pax(m, task);
++ #endif
+  	return 0;
+  }
+  
+diff --color -rcNP /tmp/clean/include/linux/binfmts.h patched/include/linux/binfmts.h
+*** /tmp/clean/include/linux/binfmts.h	2024-03-11 07:03:45.155586968 +0300
+--- patched/include/linux/binfmts.h	2024-03-11 10:26:13.210138947 +0300
+***************
+*** 105,110 ****
+--- 105,113 ----
+  	int (*load_binary)(struct linux_binprm *);
+  	int (*load_shlib)(struct file *);
+  	int (*core_dump)(struct coredump_params *cprm);
++ #ifdef CONFIG_PAX_MPROTECT
++ 	void (*handle_mprotect)(struct vm_area_struct *vma, unsigned long newflags);
++ #endif
+  	unsigned long min_coredump;	/* minimal dump size */
+  } __randomize_layout;
+  
+diff --color -rcNP /tmp/clean/include/linux/elf.h patched/include/linux/elf.h
+*** /tmp/clean/include/linux/elf.h	2024-03-11 07:03:44.696586985 +0300
+--- patched/include/linux/elf.h	2024-03-11 10:26:54.480137425 +0300
+***************
+*** 31,36 ****
+--- 31,37 ----
+  #define elf_addr_t	Elf32_Off
+  #define Elf_Half	Elf32_Half
+  #define Elf_Word	Elf32_Word
++ #define elf_dyn		Elf32_Dyn
+  
+  #else
+  
+***************
+*** 42,47 ****
+--- 43,49 ----
+  #define elf_addr_t	Elf64_Off
+  #define Elf_Half	Elf64_Half
+  #define Elf_Word	Elf64_Word
++ #define elf_dyn		Elf64_Dyn
+  
+  #endif
+  
+diff --color -rcNP /tmp/clean/include/linux/fcntl.h patched/include/linux/fcntl.h
+*** /tmp/clean/include/linux/fcntl.h	2024-03-11 07:03:44.700586985 +0300
+--- patched/include/linux/fcntl.h	2024-03-11 10:27:28.498136170 +0300
+***************
+*** 9,15 ****
+  	(O_RDONLY | O_WRONLY | O_RDWR | O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC | \
+  	 O_APPEND | O_NDELAY | O_NONBLOCK | O_NDELAY | __O_SYNC | O_DSYNC | \
+  	 FASYNC	| O_DIRECT | O_LARGEFILE | O_DIRECTORY | O_NOFOLLOW | \
+! 	 O_NOATIME | O_CLOEXEC | O_PATH | __O_TMPFILE)
+  
+  #ifndef force_o_largefile
+  #define force_o_largefile() (!IS_ENABLED(CONFIG_ARCH_32BIT_OFF_T))
+--- 9,15 ----
+  	(O_RDONLY | O_WRONLY | O_RDWR | O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC | \
+  	 O_APPEND | O_NDELAY | O_NONBLOCK | O_NDELAY | __O_SYNC | O_DSYNC | \
+  	 FASYNC	| O_DIRECT | O_LARGEFILE | O_DIRECTORY | O_NOFOLLOW | \
+! 	 O_NOATIME | O_CLOEXEC | O_PATH | __O_TMPFILE | O_MAYEXEC)
+  
+  #ifndef force_o_largefile
+  #define force_o_largefile() (!IS_ENABLED(CONFIG_ARCH_32BIT_OFF_T))
+diff --color -rcNP /tmp/clean/include/linux/fs.h patched/include/linux/fs.h
+*** /tmp/clean/include/linux/fs.h	2024-03-11 07:03:45.309586963 +0300
+--- patched/include/linux/fs.h	2024-03-11 10:27:51.691135315 +0300
+***************
+*** 101,106 ****
+--- 101,107 ----
+  #define MAY_CHDIR		0x00000040
+  /* called from RCU mode, don't block */
+  #define MAY_NOT_BLOCK		0x00000080
++ #define MAY_OPENEXEC 		0x00000100
+  
+  /*
+   * flags in file.f_mode.  Note that FMODE_READ and FMODE_WRITE must correspond
+diff --color -rcNP /tmp/clean/include/linux/mm_types.h patched/include/linux/mm_types.h
+*** /tmp/clean/include/linux/mm_types.h	2024-03-11 07:03:45.222586966 +0300
+--- patched/include/linux/mm_types.h	2024-03-11 10:28:35.913133684 +0300
+***************
+*** 524,529 ****
+--- 524,536 ----
+  		atomic_long_t hugetlb_usage;
+  #endif
+  		struct work_struct async_put_work;
++ #if defined(CONFIG_PAX)
++ 		unsigned long pax_flags;
++ #ifdef CONFIG_PAX_ASLR
++ 		unsigned long delta_mmap;		/* randomized offset */
++ 		unsigned long delta_stack;		/* randomized offset */
++ #endif
++ #endif
+  	} __randomize_layout;
+  
+  	/*
+diff --color -rcNP /tmp/clean/include/linux/random.h patched/include/linux/random.h
+*** /tmp/clean/include/linux/random.h	2024-03-11 07:03:45.256586965 +0300
+--- patched/include/linux/random.h	2024-03-11 10:29:52.621130855 +0300
+***************
+*** 138,141 ****
+--- 138,146 ----
+  extern const struct file_operations random_fops, urandom_fops;
+  #endif
+  
++ static inline unsigned long pax_get_random_long(void)
++ {
++ 	return prandom_u32() + (sizeof(long) > 4 ? (unsigned long)prandom_u32() << 32 : 0);
++ }
++ 
+  #endif /* _LINUX_RANDOM_H */
+diff --color -rcNP /tmp/clean/include/linux/sched.h patched/include/linux/sched.h
+*** /tmp/clean/include/linux/sched.h	2024-03-11 07:03:45.262586964 +0300
+--- patched/include/linux/sched.h	2024-03-11 10:30:37.671129194 +0300
+***************
+*** 1861,1866 ****
+--- 1861,1875 ----
+  #define TASK_SIZE_OF(tsk)	TASK_SIZE
+  #endif
+  
++ #define MF_PAX_PAGEEXEC		0x01000000	/* Paging based non-executable pages */
++ #define MF_PAX_EMUTRAMP		0x02000000	/* Emulate trampolines */
++ #define MF_PAX_MPROTECT		0x04000000	/* Restrict mprotect() */
++ #define MF_PAX_RANDMMAP		0x08000000	/* Randomize mmap() base */
++ /*#define MF_PAX_RANDEXEC		0x10000000*/	/* Randomize ET_EXEC base */
++ #define MF_PAX_SEGMEXEC		0x20000000	/* Segmentation based non-executable pages */
++ 
++ #define PAX_PARSE_FLAGS_FALLBACK	(~0UL)
++ 
+  #ifdef CONFIG_RSEQ
+  
+  /*
+diff --color -rcNP /tmp/clean/include/uapi/asm-generic/fcntl.h patched/include/uapi/asm-generic/fcntl.h
+*** /tmp/clean/include/uapi/asm-generic/fcntl.h	2024-03-11 07:03:45.677586949 +0300
+--- patched/include/uapi/asm-generic/fcntl.h	2024-03-11 10:31:26.724127385 +0300
+***************
+*** 97,102 ****
+--- 97,106 ----
+  #define O_NDELAY	O_NONBLOCK
+  #endif
+  
++ #ifndef O_MAYEXEC
++ #define O_MAYEXEC	00000040	/* command execution from file is intended, check exec permissions */
++ #endif
++ 
+  #define F_DUPFD		0	/* dup */
+  #define F_GETFD		1	/* get close_on_exec */
+  #define F_SETFD		2	/* set/clear close_on_exec */
+diff --color -rcNP /tmp/clean/include/uapi/linux/elf.h patched/include/uapi/linux/elf.h
+*** /tmp/clean/include/uapi/linux/elf.h	2024-03-11 07:03:45.744586947 +0300
+--- patched/include/uapi/linux/elf.h	2024-03-11 10:32:19.927125423 +0300
+***************
+*** 38,43 ****
+--- 38,44 ----
+  #define PT_GNU_EH_FRAME		0x6474e550
+  
+  #define PT_GNU_STACK	(PT_LOOS + 0x474e551)
++ #define PT_GNU_RELRO	(PT_LOOS + 0x474e552)
+  
+  /*
+   * Extended Numbering
+***************
+*** 95,100 ****
+--- 96,103 ----
+  #define DT_DEBUG	21
+  #define DT_TEXTREL	22
+  #define DT_JMPREL	23
++ #define DT_FLAGS	30
++ #define DF_TEXTREL  0x00000004
+  #define DT_ENCODING	32
+  #define OLD_DT_LOOS	0x60000000
+  #define DT_LOOS		0x6000000d
+diff --color -rcNP /tmp/clean/ipc/shm.c patched/ipc/shm.c
+*** /tmp/clean/ipc/shm.c	2024-03-11 07:03:46.022586936 +0300
+--- patched/ipc/shm.c	2024-03-11 10:33:00.441123928 +0300
+***************
+*** 1564,1569 ****
+--- 1564,1572 ----
+  		f_flags = O_RDWR;
+  	}
+  	if (shmflg & SHM_EXEC) {
++ #ifdef CONFIG_PAX_NOWRITEEXEC
++ 		goto out;
++ #endif
+  		prot |= PROT_EXEC;
+  		acc_mode |= S_IXUGO;
+  	}
+diff --color -rcNP /tmp/clean/kernel/sysctl.c patched/kernel/sysctl.c
+*** /tmp/clean/kernel/sysctl.c	2024-03-11 07:04:48.846584619 +0300
+--- patched/kernel/sysctl.c	2024-03-11 10:33:54.850121922 +0300
+***************
+*** 771,785 ****
+  	.extra2		= SYSCTL_ONE,
+  	},
+  #endif
+- #ifdef CONFIG_UEVENT_HELPER
+- 	{
+- 		.procname	= "hotplug",
+- 		.data		= &uevent_helper,
+- 		.maxlen		= UEVENT_HELPER_PATH_LEN,
+- 		.mode		= 0644,
+- 		.proc_handler	= proc_dostring,
+- 	},
+- #endif
+  #ifdef CONFIG_CHR_DEV_SG
+  	{
+  		.procname	= "sg-big-buff",
+--- 771,776 ----
+***************
+*** 1741,1762 ****
+  		.proc_handler	= numa_zonelist_order_handler,
+  	},
+  #endif
+- #if (defined(CONFIG_X86_32) && !defined(CONFIG_UML))|| \
+-    (defined(CONFIG_SUPERH) && defined(CONFIG_VSYSCALL))
+- 	{
+- 		.procname	= "vdso_enabled",
+- #ifdef CONFIG_X86_32
+- 		.data		= &vdso32_enabled,
+- 		.maxlen		= sizeof(vdso32_enabled),
+- #else
+- 		.data		= &vdso_enabled,
+- 		.maxlen		= sizeof(vdso_enabled),
+- #endif
+- 		.mode		= 0644,
+- 		.proc_handler	= proc_dointvec,
+- 		.extra1		= SYSCTL_ZERO,
+- 	},
+- #endif
+  #ifdef CONFIG_HIGHMEM
+  	{
+  		.procname	= "highmem_is_dirtyable",
+--- 1732,1737 ----
+diff --color -rcNP /tmp/clean/mm/mmap.c patched/mm/mmap.c
+*** /tmp/clean/mm/mmap.c	2024-03-11 07:03:46.951586902 +0300
+--- patched/mm/mmap.c	2024-03-11 10:40:32.617107252 +0300
+***************
+*** 1464,1469 ****
+--- 1464,1480 ----
+  	vm_flags |= calc_vm_prot_bits(prot, pkey) | calc_vm_flag_bits(flags) |
+  			mm->def_flags | VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC;
+  
++ #ifdef CONFIG_PAX_NOWRITEEXEC
++ 	if ((vm_flags & (VM_WRITE | VM_EXEC)) == (VM_WRITE | VM_EXEC))
++ 		return -EPERM;
++ #ifdef CONFIG_PAX_MPROTECT
++ 	if (!(vm_flags & VM_EXEC))
++ 		vm_flags &= ~VM_MAYEXEC;
++ 	else
++ 		vm_flags &= ~VM_MAYWRITE;
++ #endif
++ #endif
++ 
+  	if (flags & MAP_LOCKED)
+  		if (!can_do_mlock())
+  			return -EPERM;
+***************
+*** 1730,1735 ****
+--- 1741,1751 ----
+  	unsigned long charged = 0;
+  
+  	/* Check against address space limit. */
++ 	
++ #ifdef CONFIG_PAX_RANDMMAP
++ 	if (!(mm->pax_flags & MF_PAX_RANDMMAP) || (vm_flags & (VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC)))
++ #endif
++ 	
+  	if (!may_expand_vm(mm, vm_flags, len >> PAGE_SHIFT)) {
+  		unsigned long nr_pages;
+  
+***************
+*** 2113,2119 ****
+  
+  	if (flags & MAP_FIXED)
+  		return addr;
+! 
+  	if (addr) {
+  		addr = PAGE_ALIGN(addr);
+  		vma = find_vma_prev(mm, addr, &prev);
+--- 2129,2139 ----
+  
+  	if (flags & MAP_FIXED)
+  		return addr;
+! 		
+! #ifdef CONFIG_PAX_RANDMMAP
+! 	if (!(mm->pax_flags & MF_PAX_RANDMMAP))
+! #endif
+! 	
+  	if (addr) {
+  		addr = PAGE_ALIGN(addr);
+  		vma = find_vma_prev(mm, addr, &prev);
+***************
+*** 2155,2160 ****
+--- 2175,2184 ----
+  	if (flags & MAP_FIXED)
+  		return addr;
+  
++ #ifdef CONFIG_PAX_RANDMMAP
++ 	if (!(mm->pax_flags & MF_PAX_RANDMMAP))
++ #endif
++ 	
+  	/* requesting a specific address */
+  	if (addr) {
+  		addr = PAGE_ALIGN(addr);
+***************
+*** 2183,2188 ****
+--- 2207,2218 ----
+  		VM_BUG_ON(addr != -ENOMEM);
+  		info.flags = 0;
+  		info.low_limit = TASK_UNMAPPED_BASE;
++ 		
++ #ifdef CONFIG_PAX_RANDMMAP
++ 		if (mm->pax_flags & MF_PAX_RANDMMAP)
++ 			info.low_limit += mm->delta_mmap;
++ #endif
++ 		
+  		info.high_limit = mmap_end;
+  		addr = vm_unmapped_area(&info);
+  	}
+***************
+*** 3034,3040 ****
+  	if ((flags & (~VM_EXEC)) != 0)
+  		return -EINVAL;
+  	flags |= VM_DATA_DEFAULT_FLAGS | VM_ACCOUNT | mm->def_flags;
+! 
+  	error = get_unmapped_area(NULL, addr, len, 0, MAP_FIXED);
+  	if (offset_in_page(error))
+  		return error;
+--- 3064,3073 ----
+  	if ((flags & (~VM_EXEC)) != 0)
+  		return -EINVAL;
+  	flags |= VM_DATA_DEFAULT_FLAGS | VM_ACCOUNT | mm->def_flags;
+! #ifdef CONFIG_PAX_MPROTECT
+! 	flags &= ~VM_MAYEXEC;
+! #endif
+! 	
+  	error = get_unmapped_area(NULL, addr, len, 0, MAP_FIXED);
+  	if (offset_in_page(error))
+  		return error;
+***************
+*** 3345,3350 ****
+--- 3378,3387 ----
+  
+  void vm_stat_account(struct mm_struct *mm, vm_flags_t flags, long npages)
+  {
++ #ifdef CONFIG_PAX_RANDMMAP
++ 	if (!(mm->pax_flags & MF_PAX_RANDMMAP) || (flags & (VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC)))
++ #endif
++ 	
+  	mm->total_vm += npages;
+  
+  	if (is_exec_mapping(flags))
+***************
+*** 3440,3445 ****
+--- 3477,3493 ----
+  	vma->vm_start = addr;
+  	vma->vm_end = addr + len;
+  
++ #ifdef CONFIG_PAX_NOWRITEEXEC
++ 	if ((vm_flags & (VM_WRITE | VM_EXEC)) == (VM_WRITE | VM_EXEC))
++ 		return ERR_PTR(-EPERM);
++ #ifdef CONFIG_PAX_MPROTECT
++ 	if (!(vm_flags & VM_EXEC))
++ 		vm_flags &= ~VM_MAYEXEC;
++ 	else
++ 		vm_flags &= ~VM_MAYWRITE;
++ #endif
++ #endif
++ 	
+  	vma->vm_flags = vm_flags | mm->def_flags | VM_DONTEXPAND | VM_SOFTDIRTY;
+  	vma->vm_page_prot = vm_get_page_prot(vma->vm_flags);
+  
+diff --color -rcNP /tmp/clean/mm/mprotect.c patched/mm/mprotect.c
+*** /tmp/clean/mm/mprotect.c	2024-03-11 07:03:46.917586903 +0300
+--- patched/mm/mprotect.c	2024-03-11 10:41:49.759104407 +0300
+***************
+*** 26,31 ****
+--- 26,35 ----
+  #include <linux/perf_event.h>
+  #include <linux/pkeys.h>
+  #include <linux/ksm.h>
++ #ifdef CONFIG_PAX_MPROTECT
++ #include <linux/elf.h>
++ #include <linux/binfmts.h>
++ #endif
+  #include <linux/uaccess.h>
+  #include <linux/mm_inline.h>
+  #include <asm/pgtable.h>
+***************
+*** 455,460 ****
+--- 459,468 ----
+  	 * held in write mode.
+  	 */
+  	vma->vm_flags = newflags;
++ #ifdef CONFIG_PAX_MPROTECT
++ 	if (mm->binfmt && mm->binfmt->handle_mprotect)
++ 		mm->binfmt->handle_mprotect(vma, newflags);
++ #endif
+  	dirty_accountable = vma_wants_writenotify(vma, vma->vm_page_prot);
+  	vma_set_page_prot(vma);
+  
+***************
+*** 548,553 ****
+--- 556,566 ----
+  	if (start > vma->vm_start)
+  		prev = vma;
+  
++ 	#ifdef CONFIG_PAX_MPROTECT
++ 	if (current->mm->binfmt && current->mm->binfmt->handle_mprotect)
++ 		current->mm->binfmt->handle_mprotect(vma, calc_vm_prot_bits(prot, 0));
++ #endif
++ 	
+  	for (nstart = start ; ; ) {
+  		unsigned long mask_off_old_flags;
+  		unsigned long newflags;
+diff --color -rcNP /tmp/clean/mm/util.c patched/mm/util.c
+*** /tmp/clean/mm/util.c	2024-03-11 07:03:46.970586901 +0300
+--- patched/mm/util.c	2024-03-11 10:43:10.063101445 +0300
+***************
+*** 308,313 ****
+--- 308,318 ----
+  {
+  	unsigned long random_variable = 0;
+  
++ #ifdef CONFIG_PAX_RANDUSTACK
++ 	if (current->mm->pax_flags & MF_PAX_RANDMMAP)
++ 		return stack_top - current->mm->delta_stack;
++ #endif
++ 	
+  	if (current->flags & PF_RANDOMIZE) {
+  		random_variable = get_random_long();
+  		random_variable &= STACK_RND_MASK;
+***************
+*** 434,439 ****
+--- 439,450 ----
+  void arch_pick_mmap_layout(struct mm_struct *mm, struct rlimit *rlim_stack)
+  {
+  	mm->mmap_base = TASK_UNMAPPED_BASE;
++ 
++ #ifdef CONFIG_PAX_RANDMMAP
++ 	if (mm->pax_flags & MF_PAX_RANDMMAP)
++ 		mm->mmap_base += mm->delta_mmap;
++ #endif
++ 	
+  	mm->get_unmapped_area = arch_get_unmapped_area;
+  }
+  #endif
+diff --color -rcNP /tmp/clean/security/Kconfig patched/security/Kconfig
+*** /tmp/clean/security/Kconfig	2024-03-11 07:04:48.846584619 +0300
+--- patched/security/Kconfig	2024-03-11 10:43:55.663099764 +0300
+***************
+*** 5,10 ****
+--- 5,177 ----
+  
+  menu "Security options"
+  
++ menuconfig PAX
++ 	bool "Enable various PaX features"
++ 	depends on X86
++ 	help
++ 	  This allows you to enable various PaX features.  PaX adds
++ 	  intrusion prevention mechanisms to the kernel that reduce
++ 	  the risks posed by exploitable memory corruption bugs.
++ 
++ if PAX
++ config TASK_SIZE_MAX_SHIFT
++ 	int
++ 	depends on X86_64
++ 	default 47
++ 
++ config PAX_NOWRITEEXEC
++ 	bool "Enforce non-executable pages"
++ 	depends on X86
++ 	help
++ 	  Enforces writables pages to be non-executable (such as the stack
++ 	  or heap). And enforces executable pages to be non-writable.
++ 
++ 	  Enabling this option will prevent the injection and execution of
++ 	  'foreign' code in a program.
++ 
++ 	  This will also break programs that rely on the old behaviour and
++ 	  expect that dynamically allocated memory via the malloc() family
++ 	  of functions is executable (which it is not).  Notable examples
++ 	  are the XFree86 4.x server, the java runtime and wine.
++ 
++ choice
++ 	prompt "Executable stack"
++ 
++ 	help
++ 	  Select the security model for the binaries with executable stack.
++ 
++ 	config PAX_EMUTRAMP
++ 		bool "emulate"
++ 		help
++ 		  There are some programs and libraries that for one reason or
++ 		  another attempt to execute special small code snippets from
++ 		  non-executable memory pages.  Most notable examples are the
++ 		  signal handler return code generated by the kernel itself and
++ 		  the GCC trampolines.
++ 
++ 		  If you enabled CONFIG_NOWRITEEXEC then such programs will no
++ 		  longer work under your kernel.
++ 
++ 		  As a remedy you can say Y here enable trampoline emulation for
++ 		  the affected programs yet still have the protection provided by
++ 		  the non-executable pages.
++ 
++ 		  NOTE: enabling this feature *may* open up a loophole in the
++ 		  protection provided by non-executable pages that an attacker
++ 		  could abuse.  Therefore the best solution is to not have any
++ 		  files on your system that would require this option.  This can
++ 		  be achieved by not using libc5 (which relies on the kernel
++ 		  signal handler return code) and not using or rewriting programs
++ 		  that make use of the nested function implementation of GCC.
++ 		  Skilled users can just fix GCC itself so that it implements
++ 		  nested function calls in a way that does not interfere with PaX.
++ 
++ 	config EXECSTACK_DISABLED
++ 		bool "disabled"
++ 
++ endchoice
++ 
++ config PAX_MPROTECT
++ 	bool "Restrict mprotect()"
++ 	help
++ 	  Enabling this option will prevent programs from
++ 	   - changing the executable status of memory pages that were
++ 	     not originally created as executable,
++ 	   - making read-only executable pages writable again,
++ 	   - creating executable pages from anonymous memory,
++ 	   - making read-only-after-relocations (RELRO) data pages writable again.
++ 
++ 	  You should say Y here to complete the protection provided by
++ 	  the enforcement of non-executable pages.
++ 
++ endif
++ 
++ if PAX
++ menuconfig PAX_MEMORY
++ 	bool "Address Space Layout Randomization"
++ 	depends on PAX
++ 
++ if PAX_MEMORY
++ config PAX_ASLR
++ 	bool "Address Space Layout Randomization"
++ 	help
++ 	  Many if not most exploit techniques rely on the knowledge of
++ 	  certain addresses in the attacked program.  The following options
++ 	  will allow the kernel to apply a certain amount of randomization
++ 	  to specific parts of the program thereby forcing an attacker to
++ 	  guess them in most cases.  Any failed guess will most likely crash
++ 	  the attacked program which allows the kernel to detect such attempts
++ 	  and react on them.  PaX itself provides no reaction mechanisms,
++ 	  instead it is strongly encouraged that you make use of grsecurity's
++ 	  (http://www.grsecurity.net/) built-in crash detection features or
++ 	  develop one yourself.
++ 
++ 	  By saying Y here you can choose to randomize the following areas:
++ 	   - top of the task's kernel stack
++ 	   - top of the task's userland stack
++ 	   - base address for mmap() requests that do not specify one
++ 	     (this includes all libraries)
++ 	   - base address of the main executable
++ 
++ 	  It is strongly recommended to say Y here as address space layout
++ 	  randomization has negligible impact on performance yet it provides
++ 	  a very effective protection.
++ 
++ 	  NOTE: you can use the 'chpax' or 'paxctl' utilities to control
++ 	  this feature on a per file basis.
++ 
++ config PAX_RANDKSTACK
++ 	bool "Randomize kernel stack base"
++ 	depends on X86_TSC && X86
++ 	help
++ 	  By saying Y here the kernel will randomize every task's kernel
++ 	  stack on every system call.  This will not only force an attacker
++ 	  to guess it but also prevent him from making use of possible
++ 	  leaked information about it.
++ 
++ 	  Since the kernel stack is a rather scarce resource, randomization
++ 	  may cause unexpected stack overflows, therefore you should very
++ 	  carefully test your system.  Note that once enabled in the kernel
++ 	  configuration, this feature cannot be disabled on a per file basis.
++ 
++ 
++ config PAX_RANDUSTACK
++ 	bool
++ 
++ config PAX_RANDMMAP
++ 	bool "Randomize user stack and mmap() bases"
++ 	depends on PAX_ASLR
++ 	select PAX_RANDUSTACK
++ 	help
++ 	  By saying Y here the kernel will randomize every task's userland
++ 	  stack and use a randomized base address for mmap() requests that
++ 	  do not specify one themselves.
++ 
++ 	  The stack randomization is done in two steps where the second
++ 	  one may apply a big amount of shift to the top of the stack and
++ 	  cause problems for programs that want to use lots of memory (more
++ 	  than 2.5 GB if SEGMEXEC is not active, or 1.25 GB when it is).
++ 
++ 	  As a result of mmap randomization all dynamically loaded libraries
++ 	  will appear at random addresses and therefore be harder to exploit
++ 	  by a technique where an attacker attempts to execute library code
++ 	  for his purposes (e.g. spawn a shell from an exploited program that
++ 	  is running at an elevated privilege level).
++ 
++ 	  Furthermore, if a program is relinked as a dynamic ELF file, its
++ 	  base address will be randomized as well, completing the full
++ 	  randomization of the address space layout.  Attacking such programs
++ 	  becomes a guess game.  You can find an example of doing this at
++ 	  http://pax.grsecurity.net/et_dyn.tar.gz and practical samples at
++ 	  http://www.grsecurity.net/grsec-gcc-specs.tar.gz .
++ 
++ 	  NOTE: you can use the 'chpax' or 'paxctl' utilities to control this
++ 	  feature on a per file basis.
++ 
++ endif
++ 
++ endif
++ 
+  source "security/keys/Kconfig"
+  
+  config SECURITY_DMESG_RESTRICT
