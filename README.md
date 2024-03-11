@@ -7,7 +7,7 @@ Configured using whonix hardened-kernel config.
 
 Being tested: Sysfs patch.
 
-Working on: finishing 0005 - sysfs patch
+Working on: finishing 0006 - sysfs patch
 
 Current problems (issues are welcome):
 
