@@ -3,7 +3,7 @@
 Hardened Kernel for Void Linux.
 Kernel Version 5.4
 
-Configured using whonix hardened-kernel config.
+Configured using whonix hardened-kernel config and additional attack surface reduction.
 
 Being tested: Sysfs patch.
 
