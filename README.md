@@ -5,18 +5,14 @@ Kernel Version 5.4
 
 Configured using whonix hardened-kernel config and additional attack surface reduction.
 
-Being tested: Sysfs patch.
-
-Working on: finishing 0005 - sysfs patch
+Working on:
+0006 - sysfs patch,
+0007 - pax forward-port
 
 Current problems (issues are welcome):
 
-Testing dir: Patches and/or configs we are planning or testing currently.
-
-Unused dir: Patches we dont use but include in this repo if you wanna use it.
-
-0001 = Linux-Hardened
-0002 = Tirdad
-0003 = IPC Hardening
-0004 = Disabling Perf Events
-0005 = Module Restricting
+* 0001 = Linux-Hardened
+* 0002 = Tirdad
+* 0003 = IPC Hardening
+* 0004 = Disabling Perf Events
+* 0005 = Module Restricting
