@@ -6,8 +6,7 @@ Kernel Version 5.4
 Configured using whonix hardened-kernel config and additional attack surface reduction.
 
 Working on:
-* 0006 - sysfs patch,
-* 0007 - pax forward-port
+* 0006 - sysfs patch
 
 Current problems (issues are welcome):
 
